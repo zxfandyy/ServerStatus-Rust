@@ -12,7 +12,6 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use sysinfo::{System, SystemExt};
 use tokio::time;
 
 use stat_common::server_status::{IpInfo, StatRequest, SysInfo};
@@ -97,6 +96,28 @@ pub struct Args {
         help = "ip info source"
     )]
     ip_source: String,
+    #[arg(
+        long = "ipv4-addr",
+        env = "SSR_IPV4_ADDR",
+        default_value = "ipv4.google.com:80",
+        help = "ipv4 check address"
+    )]
+    ipv4_address: String,
+    #[arg(
+        long = "ipv6-addr",
+        env = "SSR_IPV6_ADDR",
+        default_value = "ipv6.google.com:80",
+        help = "ipv6 check address"
+    )]
+    ipv6_address: String,
+    #[arg(
+        short = 'o',
+        long,
+        env = "SSR_ONLINE",
+        default_value = "0",
+        help = "online 1:ipv4, 2:ipv6, 3:both"
+    )]
+    online: u8,
     #[arg(long = "json", help = "use json protocol, default:false")]
     json: bool,
     #[arg(short = '6', long = "ipv6", help = "ipv6 only, default:false")]
@@ -121,6 +142,10 @@ pub struct Args {
     disable_notify: bool,
     #[arg(short = 't', long = "type", env = "SSR_TYPE", default_value = "", help = "host type")]
     host_type: String,
+    #[arg(long = "mtls", env = "SSR_MTLS", help = "enable mTLS, default:false")]
+    mtls: bool,
+    #[arg(long, env = "SSR_TLS_DIR", default_value = "tls", help = "tls certs dir")]
+    tls_dir: String,
     #[arg(long, env = "SSR_LOC", default_value = "", help = "location")]
     location: String,
     #[arg(short = 'd', long = "debug", env = "SSR_DEBUG", help = "debug mode, default:false")]
@@ -259,7 +284,7 @@ fn http_report(args: &Args, stat_base: &mut StatRequest) -> Result<()> {
                 .post(&url)
                 .basic_auth(auth_user, Some(auth_pass))
                 .timeout(Duration::from_secs(3))
-                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_TYPE.as_str(), content_type)
                 .header("ssr-auth", ssr_auth)
                 .body(body_data.unwrap())
                 .send()
@@ -316,7 +341,7 @@ async fn main() -> Result<()> {
     }
 
     // support check
-    if !System::IS_SUPPORTED {
+    if !sysinfo::IS_SUPPORTED_SYSTEM {
         panic!("当前系统不支持，请切换到Python跨平台版本!");
     }
 
@@ -352,7 +377,7 @@ async fn main() -> Result<()> {
     }
 
     status::start_all_ping_collect_t(&args);
-    let (ipv4, ipv6) = status::get_network();
+    let (ipv4, ipv6) = status::get_network(&args);
     eprintln!("get_network (ipv4, ipv6) => ({ipv4}, {ipv6})");
 
     if !args.disable_extra {
@@ -398,7 +423,7 @@ async fn main() -> Result<()> {
         let result = http_report(&args, &mut stat_base);
         dbg!(&result);
     } else if args.addr.starts_with("grpc") {
-        let result = grpc::report(&args, &mut stat_base).await;
+        let result = { grpc::report(&args, &mut stat_base).await };
         dbg!(&result);
     } else {
         eprint!("invalid addr scheme!");

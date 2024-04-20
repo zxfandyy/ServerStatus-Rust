@@ -20,12 +20,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::vnstat;
 use crate::Args;
-use stat_common::server_status::StatRequest;
+use stat_common::server_status::{DiskInfo, StatRequest};
 
 const SAMPLE_PERIOD: u64 = 1000; //ms
 const TIMEOUT_MS: u64 = 1000;
-static IPV4_ADDR: &str = "ipv4.google.com:80";
-static IPV6_ADDR: &str = "ipv6.google.com:80";
 
 pub fn get_uptime() -> u64 {
     fs::read_to_string("/proc/uptime")
@@ -135,24 +133,42 @@ pub fn get_sys_traffic(args: &Args) -> (u64, u64) {
 }
 
 static DF_CMD:&str = "df -Tlm --total -t ext4 -t ext3 -t ext2 -t reiserfs -t jfs -t ntfs -t fat32 -t btrfs -t fuseblk -t zfs -t simfs -t xfs";
-pub fn get_hdd() -> (u64, u64) {
+pub fn get_hdd(stat: &mut StatRequest) {
     let (mut hdd_total, mut hdd_used) = (0, 0);
     let a = &Command::new("/bin/sh")
         .args(["-c", DF_CMD])
         .output()
         .expect("failed to execute df")
         .stdout;
-    let _ = str::from_utf8(a).map(|s| {
-        s.trim().split('\n').last().map(|s| {
-            let vec: Vec<&str> = s.split_whitespace().collect();
-            // dbg!(&vec);
-            hdd_total = vec[2].parse::<u64>().unwrap();
-            hdd_used = vec[3].parse::<u64>().unwrap();
-            Some(())
-        });
-    });
 
-    (hdd_total, hdd_used)
+    let _ = str::from_utf8(a).map(|content| {
+        let vs = content.trim().split('\n').collect::<Vec<&str>>().to_vec();
+
+        for (idx, s) in vs.iter().enumerate() {
+            // header
+            if idx == 0 {
+                continue;
+            }
+
+            let vec = (*s).split_whitespace().collect::<Vec<&str>>();
+            if idx == vs.len() - 1 {
+                // total
+                stat.hdd_total = vec[2].parse::<u64>().unwrap();
+                stat.hdd_used = vec[3].parse::<u64>().unwrap();
+            } else {
+                let di = DiskInfo {
+                    name: vec[0].to_string(),
+                    mount_point: vec[6].to_string(),
+                    file_system: vec[1].to_string(),
+                    // TODO: fix this
+                    total: vec[2].parse::<u64>().unwrap() * 1024 * 1024,
+                    used: vec[3].parse::<u64>().unwrap() * 1024 * 1024,
+                    free: vec[4].parse::<u64>().unwrap() * 1024 * 1024,
+                };
+                stat.disks.push(di);
+            }
+        }
+    });
 }
 
 #[derive(Debug, Default)]
@@ -253,9 +269,14 @@ pub fn start_cpu_percent_collect_t() {
     });
 }
 
-pub fn get_network() -> (bool, bool) {
-    let mut network: [bool; 2] = [false, false];
-    let addrs = vec![IPV4_ADDR, IPV6_ADDR];
+static ONLINE_IPV4: u8 = 1;
+static ONLINE_IPV6: u8 = 2;
+pub fn get_network(args: &Args) -> (bool, bool) {
+    let mut network: [bool; 2] = [(args.online & ONLINE_IPV4) != 0, (args.online & ONLINE_IPV6) != 0];
+    if network.iter().any(|&x| x) {
+        return network.into();
+    }
+    let addrs = vec![&args.ipv4_address, &args.ipv6_address];
     for (idx, probe_addr) in addrs.into_iter().enumerate() {
         let _ = probe_addr.to_socket_addrs().map(|mut iter| {
             if let Some(addr) = iter.next() {
@@ -271,7 +292,7 @@ pub fn get_network() -> (bool, bool) {
         });
     }
 
-    (network[0], network[1])
+    network.into()
 }
 
 #[derive(Debug, Default)]
@@ -379,9 +400,7 @@ pub fn sample(args: &Args, stat: &mut StatRequest) {
     stat.swap_total = swap_total;
     stat.swap_used = swap_total - swap_free;
 
-    let (hdd_total, hdd_used) = get_hdd();
-    stat.hdd_total = hdd_total;
-    stat.hdd_used = hdd_used;
+    get_hdd(stat);
 
     let (t, u, p, d) = if args.disable_tupd { (0, 0, 0, 0) } else { tupd() };
     stat.tcp = t;

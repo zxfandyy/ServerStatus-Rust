@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tokio::runtime::Handle;
 use tokio::signal;
 
@@ -53,8 +54,8 @@ struct Args {
 
 fn create_app_router() -> Router {
     let cors_layer = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST]);
+        .allow_methods([Method::GET, Method::POST])
+        .allow_origin(Any);
 
     Router::new()
         .route("/report", post(http::report))
@@ -180,16 +181,13 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     // serv grpc
-    tokio::spawn(async move {
-        let addr = &*G_CONFIG.get().unwrap().grpc_addr;
-        grpc::serv_grpc(addr).await
-    });
+    tokio::spawn(async move { grpc::serv_grpc(cfg).await });
 
-    let http_addr = G_CONFIG.get().unwrap().http_addr.to_string();
+    let http_addr = cfg.http_addr.to_string();
     eprintln!("🚀 listening on http://{http_addr}");
 
-    axum::Server::bind(&http_addr.parse().unwrap())
-        .serve(create_app_router().into_make_service())
+    let listener = TcpListener::bind(&http_addr).await.unwrap();
+    axum::serve(listener, create_app_router())
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
